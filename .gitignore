@@ -1,0 +1,4 @@
+.clasp.json
+*.xlsx
+*.csv
+node_modules/

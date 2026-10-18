@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title><?= title ?></title>
+<?!= include('Styles'); ?>
+<!-- Chart.js pinned to an exact version from jsDelivr, with Subresource Integrity (sha384 of chart.umd.min.js v4.5.1). -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
+        integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
+        crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="loader"><div class="spin"></div><div class="msg" id="loaderMsg">Loading live data from Google Sheets…</div></div>
+<header>
+  <div><h1 id="title"><span>Signup Funnel</span> · Success &amp; Drop-off Explorer</h1>
+  <div class="sub" id="subt"></div></div>
+  <div class="hdr-right">
+    <div class="hdr-actions"><span class="upd" id="upd"></span><button class="btn ghost" id="btnRefresh" title="Re-read the Google Sheet now (bypasses the 10-minute cache)">⟳ Refresh</button></div>
+    <div class="sub">🔒 Internal · contains customer contact details — do not share externally</div>
+  </div>
+</header>
+<div class="errbox hide" id="err"></div>
+<nav id="nav"></nav>
+<main>
+<section class="tab active" id="tab-overview">
+ <div class="grid k4" id="kpis"></div>
+ <div class="card" style="margin-top:16px"><h2>Stage journey</h2><div class="hint">Click any stage to open its tab with the users who dropped there (and toggle to those who passed).</div><div class="stages" id="stagecards"></div></div>
+ <div class="grid g2" style="margin-top:16px">
+  <div class="card"><h2>Funnel — users reaching each stage</h2><div class="hint">Green = moved on to the next stage · Red = stopped at this stage. Click a bar to drill in.</div><div class="chartbox tall"><canvas id="cFunnel"></canvas></div></div>
+  <div class="card"><h2>Stage summary</h2><div class="hint">Click a row to open that stage.</div><div class="tblwrap" style="max-height:380px"><table id="sumtbl"></table></div></div>
+ </div>
+ <div class="grid g3" style="margin-top:16px">
+  <div class="card"><h2>Where users drop (drop_stage)</h2><div class="hint">The next step each non-completer failed to reach. Click a slice.</div><div class="chartbox"><canvas id="cDrop"></canvas></div></div>
+  <div class="card"><h2>Platform</h2><div class="hint">Outcome by platform</div><div class="chartbox"><canvas id="cPlat"></canvas></div></div>
+  <div class="card"><h2>Login method</h2><div class="hint">Outcome by login method</div><div class="chartbox"><canvas id="cLogin"></canvas></div></div>
+  <div class="card"><h2>SIM path</h2><div class="hint">Outcome by chosen path</div><div class="chartbox"><canvas id="cPath"></canvas></div></div>
+  <div class="card"><h2>Country</h2><div class="hint">Users &amp; conversion by country</div><div class="chartbox"><canvas id="cCountry"></canvas></div></div>
+  <div class="card"><h2>Furthest stage by platform</h2><div class="hint">Share of each platform's users by max stage</div><div class="chartbox"><canvas id="cPlatStage"></canvas></div></div>
+ </div>
+ <div class="card" style="margin-top:16px"><h2>Outcome over first-seen date</h2><div class="hint">New users per day split by outcome, with daily conversion rate</div><div class="chartbox"><canvas id="cTime"></canvas></div></div>
+</section>
+<section class="tab" id="tab-stage">
+ <div class="card"><div class="stagehead"><div><div class="mut" id="sEyebrow"></div><h2 id="sTitle"></h2><div class="hint" id="sDesc" style="margin:4px 0 0"></div></div><div class="mini" id="sMini"></div></div>
+ <div id="sNote"></div>
+ <div class="toolbar"><div class="seg" id="sSeg"><button data-v="drop" class="on">Dropped here</button><button data-v="pass">Passed this stage</button><button data-v="all">All who reached</button></div>
+ <input type="search" id="sSearch" placeholder="Search name, email, phone, screen, country…"><button class="btn" id="sCsv">⬇ Export CSV (current view)</button><button class="btn ghost" id="sBack">← Overview</button><span class="cnt" id="sCnt"></span></div>
+ <div class="tblwrap"><table id="utbl"></table></div></div>
+</section>
+</main>
+<footer id="foot"></footer>
+<?!= include('Script'); ?>
+</body>
+</html>

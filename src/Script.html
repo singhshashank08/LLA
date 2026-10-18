@@ -1,0 +1,190 @@
+<script>
+/* Funnel dashboard client — same UX as the original static template.html; only data loading changed:
+ * data arrives from google.script.run.getDashboardData() (JSON string) instead of being inlined. */
+(function(){
+'use strict';
+const $=id=>document.getElementById(id);
+const LBL={offer:'Offer',plan:'Plan',sim_type:'SIM type',personal:'Personal info',order:'Order',processing:'Processing',confirmation:'Confirmation',delivery:'Delivery',contact:'Contact (pSIM)',completed:'Completed'};
+const L=s=>LBL[s]||s, fmt=n=>Number(n).toLocaleString(), pct=(a,b)=>b?(100*a/b).toFixed(1)+'%':'—', dash=v=>(v===''||v==null)?'—':v;
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtPhone=p=>{if(!p)return '—';const d=p.replace(/\D/g,'');return d.length===11&&d[0]==='1'?`+1 (${d.slice(1,4)}) ${d.slice(4,7)}-${d.slice(7)}`:p};
+
+// ---- state (re-assigned on every data load) ----
+let D=null,S=[],R=[],N=0,ST=[],conv=0,comp=0,worst=null,loadedAt=null;
+let charts=[];
+const reached=k=>R.filter(r=>r.ms>=k), passed=k=>R.filter(r=>r.ms>k||(k===S.length&&r.done)), stopped=k=>R.filter(r=>r.ms===k&&!r.done);
+
+// ---- Apps Script helpers (degrade gracefully outside HtmlService) ----
+const GS=(typeof google!=='undefined'&&google.script)?google.script:null;
+function setHash(id){
+  try{ if(GS&&GS.history){GS.history.replace(null,null,id);return} }catch(e){}
+  try{ if(location.hash!=='#'+id)history.replaceState(null,'','#'+id) }catch(e){}
+}
+function getInitialHash(cb){
+  try{ if(GS&&GS.url){GS.url.getLocation(l=>cb((l&&l.hash)||''));return} }catch(e){}
+  cb(location.hash.slice(1));
+}
+try{ if(GS&&GS.history&&GS.history.setChangeHandler)GS.history.setChangeHandler(e=>{const h=e&&e.location&&e.location.hash;if(h&&h!==cur)go(h)}) }catch(e){}
+window.addEventListener('hashchange',()=>{const h=location.hash.slice(1);if(h&&h!==cur&&D)go(h)});
+
+// ---- loading / errors ----
+function loading(on,msg){$('loader').classList.toggle('hide',!on);if(msg)$('loaderMsg').textContent=msg;$('btnRefresh').disabled=!!on}
+function showError(e){loading(false);const m=(e&&e.message)||String(e);const box=$('err');box.textContent='⚠ Could not load data: '+m+(D?'\nShowing the last successfully loaded data.':'\nCheck SHEET_ID / SHEET_NAME in Script Properties, then press Refresh.');box.classList.remove('hide')}
+function load(force){
+  if(!GS||!GS.run){showError(new Error('google.script.run is unavailable (open this page via the deployed web app).'));return}
+  loading(true,force?'Re-reading the Google Sheet…':'Loading live data from Google Sheets…');
+  GS.run.withSuccessHandler(json=>{try{boot(typeof json==='string'?JSON.parse(json):json)}catch(e){showError(e)}})
+        .withFailureHandler(showError)[force?'refreshDashboardData':'getDashboardData']();
+}
+$('btnRefresh').onclick=()=>load(true);
+function updAgo(){if(!D)return;const m=loadedAt?Math.round((Date.now()-loadedAt)/60000):0;$('upd').textContent=`Last updated ${D.generated}${m>=1?` (${m} min ago)`:''}`}
+setInterval(updAgo,60000);
+// Auto-refresh from the (10-min) server cache every 30 minutes while the tab is visible.
+setInterval(()=>{if(D&&document.visibilityState==='visible')load(false)},30*60000);
+
+// ---- NAV ----
+const nav=$('nav');
+nav.onclick=e=>{const b=e.target.closest('button');if(b)go(b.dataset.t)};
+let cur='overview';
+function go(id,mode){
+  if(id!=='overview'&&id!=='completed'&&!/^s\d+$/.test(id))id='overview';
+  if(/^s\d+$/.test(id)&&!(+id.slice(1)>=1&&+id.slice(1)<=S.length))id='overview';
+  cur=id;setHash(id);
+  nav.querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.t===id));
+  $('tab-overview').classList.toggle('active',id==='overview');
+  $('tab-stage').classList.toggle('active',id!=='overview');
+  if(id!=='overview')openStage(id,mode);window.scrollTo({top:0});
+}
+
+// ---- BOOT: (re)build everything from a payload ----
+function boot(payload){
+  const keep=D?{cur,mode:view.mode,q:view.q,sort:view.sort,desc:view.desc}:null;
+  D=payload;S=D.stages;R=D.rows;N=R.length;loadedAt=Date.now();
+  ST=S.map((s,i)=>{const k=i+1;const re=reached(k).length,pa=passed(k).length,dr=stopped(k).length;return{s,k,re,pa,dr}});
+  conv=R.filter(r=>r.outcome==='converted').length;comp=R.filter(r=>r.done).length;
+  worst=ST.filter(x=>x.dr>0).sort((a,b)=>b.dr-a.dr)[0]||null;
+  $('err').classList.add('hide');
+  if(D.meta&&D.meta.title){const t=D.meta.title,i=t.indexOf(' · ');$('title').innerHTML=i>0?`<span>${esc(t.slice(0,i))}</span> · ${esc(t.slice(i+3))}`:`<span>${esc(t)}</span>`;document.title=t}
+  const fsMin=R.reduce((a,r)=>r.fs&&r.fs<a?r.fs:a,'9'),fsMax=R.reduce((a,r)=>r.fs>a?r.fs:a,'0');
+  $('subt').textContent=N?`${fmt(N)} users · first seen ${fsMin} → ${fsMax} · live from sheet “${(D.meta&&D.meta.sheetName)||''}”`:'No rows found in the sheet.';
+  updAgo();
+  const w=D.meta||{};
+  if(w.skipped||(w.missingOptional&&w.missingOptional.length)){const box=$('err');box.textContent=(w.skipped?`ℹ ${w.skipped} malformed row(s) skipped. `:'')+(w.missingOptional&&w.missingOptional.length?`Optional columns missing (shown blank): ${w.missingOptional.join(', ')}`:'');box.classList.remove('hide')}
+
+  const tabs=[{id:'overview',t:'Overview'}].concat(ST.map(x=>({id:'s'+x.k,t:`${x.k}. ${L(x.s)}`,b:x.dr})),[{id:'completed',t:'✓ Completed / Delivered',b:comp,ok:1}]);
+  nav.innerHTML=tabs.map(t=>`<button data-t="${t.id}" class="${t.ok?'ok':''}">${esc(t.t)}${t.b!=null?`<span class="b">${t.b}</span>`:''}</button>`).join('');
+
+  // KPIs
+  $('kpis').innerHTML=[
+   ['c1','Total users',fmt(N),`${R.filter(r=>r.ms>=2).length} reached plan selection`],
+   ['c2','Converted (purchased)',fmt(conv),`${comp} reached delivery · ${R.filter(r=>r.outcome==='call_ticket').length} call tickets`],
+   ['c3','Conversion rate',pct(conv,N),`Delivery-stage completion ${pct(comp,N)}`],
+   ['c4','Biggest drop stage',worst?L(worst.s):'—',worst?`${worst.dr} users (${pct(worst.dr,N)}) stopped here → never reached ${S[worst.k]?L(S[worst.k]):'completion'}`:'No drop-offs']
+  ].map(([c,l,v,n])=>`<div class="card kpi ${c}"><div class="l">${l}</div><div class="v">${esc(v)}</div><div class="n">${esc(n)}</div></div>`).join('');
+
+  // stage cards
+  $('stagecards').innerHTML=ST.map(x=>`<div class="st" data-k="${x.k}"><div class="nm">Stage ${x.k}</div><div style="font-weight:600">${L(x.s)}</div><div class="rc">${fmt(x.re)}</div>
+<div class="bar"><i style="width:${x.re?100*x.pa/x.re:0}%;background:var(--ok)"></i><i style="width:${x.re?100*x.dr/x.re:0}%;background:var(--bad)"></i></div>
+<div class="dd"><span class="okc">✓ ${x.pa}</span><span class="badc">✗ ${x.dr}</span></div><div class="mut" style="font-size:11px;margin-top:4px">${pct(x.re,N)} of all</div></div>`).join('')
+   +`<div class="st" data-k="completed" style="border-color:rgba(34,197,94,.4)"><div class="nm">Outcome</div><div style="font-weight:600">Completed</div><div class="rc okc">${comp}</div><div class="bar"><i style="width:100%;background:var(--ok)"></i></div><div class="dd"><span class="okc">${pct(comp,N)}</span><span class="mut">conv ${conv}</span></div></div>`;
+
+  // summary table
+  const st=$('sumtbl');
+  st.innerHTML=`<thead><tr><th>#</th><th>Stage</th><th class="num">Reached</th><th class="num">Moved on</th><th class="num">Dropped</th><th class="num">Step conv.</th><th class="num">Of total</th></tr></thead><tbody>`+
+   ST.map(x=>`<tr class="click" data-t="s${x.k}"><td>${x.k}</td><td>${L(x.s)}</td><td class="num">${x.re}</td><td class="num okc">${x.pa}</td><td class="num badc">${x.dr}</td><td class="num">${pct(x.pa,x.re)}</td><td class="num">${pct(x.re,N)}</td></tr>`).join('')+
+   `<tr class="click" data-t="completed"><td>✓</td><td>Completed</td><td class="num">${comp}</td><td class="num okc">—</td><td class="num">—</td><td class="num">—</td><td class="num">${pct(comp,N)}</td></tr></tbody>`;
+  st.querySelector('thead').style.pointerEvents='none';
+
+  drawCharts();
+  $('foot').textContent='Stage order from max_stage (1 offer → 8 delivery). “Dropped here” = max_stage equals this stage and not completed; drop_stage column = the next step the user failed to reach. Blank contact fields shown as —.';
+
+  loading(false);
+  if(keep){view.sort=keep.sort;view.desc=keep.desc;go(keep.cur,keep.mode);if(keep.q&&keep.cur!=='overview'){view.q=keep.q;$('sSearch').value=keep.q;render()}}
+  else getInitialHash(h=>go(h||'overview'));
+}
+$('stagecards').onclick=e=>{const c=e.target.closest('.st');if(c)go(c.dataset.k==='completed'?'completed':'s'+c.dataset.k)};
+$('sumtbl').onclick=e=>{const tr=e.target.closest('tr.click');if(tr)go(tr.dataset.t)};
+
+// ---- CHARTS ----
+const OC={converted:'#22c55e',call_ticket:'#f59e0b',dropped:'#f43f5e'};
+function mk(id,cfg){const c=new Chart($(id),cfg);charts.push(c);return c}
+function drawCharts(){
+  if(typeof Chart==='undefined'){showError(new Error('Chart.js failed to load from cdn.jsdelivr.net (network/CSP?). Tables still work.'));return}
+  charts.forEach(c=>c.destroy());charts=[];
+  Chart.defaults.color='#8b97b5';Chart.defaults.borderColor='#24304f';Chart.defaults.font.family='Inter,system-ui,sans-serif';
+  mk('cFunnel',{type:'bar',data:{labels:ST.map(x=>`${x.k}. ${L(x.s)}`),datasets:[
+   {label:'Moved on',data:ST.map(x=>x.pa),backgroundColor:'#22c55e',borderRadius:4},
+   {label:'Dropped here',data:ST.map(x=>x.dr),backgroundColor:'#f43f5e',borderRadius:4}]},
+   options:{indexAxis:'y',maintainAspectRatio:false,scales:{x:{stacked:true},y:{stacked:true,grid:{display:false}}},
+   plugins:{tooltip:{callbacks:{footer:it=>{const x=ST[it[0].dataIndex];return `Reached ${x.re} (${pct(x.re,N)}) · step conv ${pct(x.pa,x.re)}`}}}},
+   onClick:(e,el)=>{if(el.length)go('s'+ST[el[0].index].k,el[0].datasetIndex===0?'pass':'drop')},onHover:(e,el)=>e.native.target.style.cursor=el.length?'pointer':'default'}});
+  const dropOrder=['plan','sim_type','personal','contact','order','processing','confirmation','delivery'];
+  R.forEach(r=>{if(r.drop&&!r.done&&dropOrder.indexOf(r.drop)===-1)dropOrder.push(r.drop)});
+  const dc=dropOrder.map(s=>R.filter(r=>r.drop===s&&!r.done).length);
+  const dropPal=['#f43f5e','#fb7185','#f97316','#f59e0b','#eab308','#a855f7','#6366f1','#06b6d4','#94a3b8','#64748b'];
+  mk('cDrop',{type:'doughnut',data:{labels:dropOrder.map(L),datasets:[{data:dc,backgroundColor:dropPal,borderColor:'#121a2f'}]},
+   options:{maintainAspectRatio:false,cutout:'60%',plugins:{legend:{position:'right'}},onClick:(e,el)=>{if(el.length){const d=dropOrder[el[0].index];const r=R.find(r=>r.drop===d&&!r.done);if(r)go('s'+r.ms,'drop')}}}});
+  const outcomeBy=(id,key,horizontal)=>{const cnt={};R.forEach(r=>{const c=r[key]||'(blank)';cnt[c]=(cnt[c]||0)+1});const cats=Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a]);
+   mk(id,{type:'bar',data:{labels:cats,datasets:Object.keys(OC).map(o=>({label:o,backgroundColor:OC[o],borderRadius:3,data:cats.map(c=>R.filter(r=>(r[key]||'(blank)')===c&&r.outcome===o).length)}))},
+   options:{indexAxis:horizontal?'y':'x',maintainAspectRatio:false,scales:{x:{stacked:true},y:{stacked:true}},plugins:{tooltip:{callbacks:{footer:it=>{const c=cats[it[0].dataIndex];const t=R.filter(r=>(r[key]||'(blank)')===c);return `Total ${t.length} · conv ${pct(t.filter(r=>r.outcome==='converted').length,t.length)}`}}}}}});};
+  outcomeBy('cPlat','platform');outcomeBy('cLogin','login',true);outcomeBy('cPath','path');outcomeBy('cCountry','country',true);
+  const plats=[...new Set(R.map(r=>r.platform))];const stPal=['#334155','#475569','#6366f1','#8b5cf6','#a855f7','#d946ef','#06b6d4','#22c55e'];
+  mk('cPlatStage',{type:'bar',data:{labels:plats,datasets:S.map((s,i)=>({label:L(s),backgroundColor:stPal[i%stPal.length],data:plats.map(p=>{const t=R.filter(r=>r.platform===p);return t.length?+(100*t.filter(r=>r.ms===i+1).length/t.length).toFixed(1):0})}))},
+   options:{maintainAspectRatio:false,scales:{x:{stacked:true},y:{stacked:true,max:100,ticks:{callback:v=>v+'%'}}},plugins:{legend:{labels:{boxWidth:10,font:{size:10}}},tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw}%`}}}}});
+  const dates=[...new Set(R.map(r=>r.fs).filter(Boolean))].sort();
+  mk('cTime',{data:{labels:dates,datasets:[...Object.keys(OC).map(o=>({type:'bar',label:o,backgroundColor:OC[o],stack:'a',borderRadius:3,yAxisID:'y',data:dates.map(d=>R.filter(r=>r.fs===d&&r.outcome===o).length)})),
+   {type:'line',label:'Conversion %',yAxisID:'y1',borderColor:'#67e8f9',backgroundColor:'#67e8f9',tension:.3,data:dates.map(d=>{const t=R.filter(r=>r.fs===d);return +(100*t.filter(r=>r.outcome==='converted').length/t.length).toFixed(1)})}]},
+   options:{maintainAspectRatio:false,scales:{x:{stacked:true},y:{stacked:true,title:{display:true,text:'Users'}},y1:{position:'right',grid:{display:false},ticks:{callback:v=>v+'%'},min:0}}}});
+}
+
+// ---- STAGE TAB ----
+const COLS=[['name','Name'],['email','Email'],['phone','Phone'],['country','Country'],['platform','Platform'],['login','Login method'],['path','Path'],['last','Last stage'],['drop','Drop stage'],['outcome','Outcome'],['lfs','Last funnel screen'],['fs','First seen'],['le','Last event'],['sv','Screen views',1],['ad','Active days',1]];
+let view={id:null,mode:'drop',q:'',sort:'le',desc:true,rows:[]};
+const segB=[...document.querySelectorAll('#sSeg button')];
+$('sSeg').onclick=e=>{const b=e.target.closest('button');if(b){view.mode=b.dataset.v;render()}};
+$('sSearch').oninput=e=>{view.q=e.target.value.toLowerCase();render()};
+$('sBack').onclick=()=>go('overview');
+const allPlat=(rows,p)=>rows.length>0&&rows.every(r=>r.platform===p);
+function openStage(id,mode){view.id=id;view.mode=mode||'drop';view.q='';$('sSearch').value='';
+ const seg=$('sSeg');let note='';
+ if(id==='completed'){seg.style.display='none';$('sEyebrow').textContent='Outcome';$('sTitle').textContent='✓ Completed / Delivered users';
+  $('sDesc').textContent=`Users who reached the final Delivery stage (completed = true).`+(conv>comp?` ${conv-comp} more users purchased (outcome = converted) but never logged a Delivery event — see the Confirmation tab.`:'');}
+ else{seg.style.display='';const k=+id.slice(1),x=ST[k-1];$('sEyebrow').textContent=`Stage ${k} of ${S.length}`;$('sTitle').textContent=L(x.s);
+  segB[0].textContent=`Dropped here (${x.dr})`;segB[1].textContent=`Passed this stage (${x.pa})`;segB[2].textContent=`All who reached (${x.re})`;
+  const nxt=S[k]?L(S[k]):'completion';$('sDesc').textContent=`${x.re} users reached ${L(x.s)} · ${x.pa} moved on (${pct(x.pa,x.re)}) · ${x.dr} stopped here and never reached ${nxt}.`;
+  const sk=stopped(k);const dd={};sk.forEach(r=>dd[r.drop]=(dd[r.drop]||0)+1);const ks=Object.keys(dd);
+  const add=t=>{note+=(note?'<br>ℹ ':'')+t};
+  if(ks.length>1)add(`Dropped users split by drop_stage: ${ks.map(d=>`<b>${esc(L(d))}</b> ${dd[d]}`).join(' · ')}. ${dd.contact?'“Contact” is the pSIM branch (contact & transfer info) instead of Personal info.':''}`);
+  const cv=sk.filter(r=>r.outcome==='converted').length;
+  if(cv){if(S[k-1]==='confirmation')add(`${cv} of the users who stopped at Confirmation are outcome = <b>converted</b> (purchased, eSIM issued) but have no Delivery event logged, so they count as converted but not completed.`);
+   else add(`${cv} user${cv>1?'s':''} who stopped at ${esc(L(x.s))} ${cv>1?'have':'has'} outcome = <b>converted</b> despite max_stage ${k} — likely missing stage events.`)}
+  // Platform-tracking quirk: only shown while the data still shows it.
+  if(k<=3&&S.length>=3&&allPlat(stopped(1),'IOS')&&allPlat(stopped(2).concat(stopped(3)),'ANDROID'))add(`Platform quirk: every user who stopped at Offer is iOS, and every user who stopped at Plan or SIM type is Android; iOS users who move on skip straight to stage 4+. The early-stage split likely reflects different event tracking per platform, not purely user behaviour.`);
+  if(k===S.length&&x.dr===0)note=`All users who reached Delivery are completed, so nobody dropped here. Use “Passed this stage” or the Completed tab.`;
+ }
+ $('sNote').innerHTML=note?`<div class="note">ℹ ${note}</div>`:'';render();}
+function base(){if(view.id==='completed')return R.filter(r=>r.done);const k=+view.id.slice(1);return view.mode==='drop'?stopped(k):view.mode==='pass'?passed(k):reached(k)}
+function render(){segB.forEach(b=>b.classList.toggle('on',b.dataset.v===view.mode));
+ let rows=base();const all=rows;
+ if(view.q){const q=view.q;rows=rows.filter(r=>[r.name,r.email,r.phone,fmtPhone(r.phone),r.country,r.platform,r.login,r.path,r.lfs,r.outcome,r.drop,r.id].join(' ').toLowerCase().includes(q))}
+ const c=COLS.find(c=>c[0]===view.sort),num=c&&c[2];
+ rows=[...rows].sort((a,b)=>{let x=a[view.sort],y=b[view.sort];if(!num){x=String(x||'\uffff').toLowerCase();y=String(y||'\uffff').toLowerCase()}return (x<y?-1:x>y?1:0)*(view.desc?-1:1)});
+ view.rows=rows;
+ $('sMini').innerHTML=[['Users',all.length],['With email',all.filter(r=>r.email).length],['With phone',all.filter(r=>r.phone).length],['iOS / Android',`${all.filter(r=>r.platform==='IOS').length} / ${all.filter(r=>r.platform==='ANDROID').length}`],['Avg screen views',all.length?Math.round(all.reduce((a,r)=>a+r.sv,0)/all.length):'—']].map(([l,v])=>`<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+ $('sCnt').textContent=`Showing ${rows.length} of ${all.length}`;
+ const pill=o=>`<span class="pill ${o==='converted'?'p-ok':o==='call_ticket'?'p-warn':'p-bad'}">${esc(o)}</span>`;
+ $('utbl').innerHTML=`<thead><tr>${COLS.map(([k,t,n])=>`<th data-k="${k}" class="${n?'num ':''}${view.sort===k?'sorted'+(view.desc?' desc':''):''}">${t}</th>`).join('')}</tr></thead><tbody>`+
+ (rows.length?rows.map(r=>`<tr><td>${esc(dash(r.name))}</td><td>${r.email?`<a href="mailto:${esc(r.email)}">${esc(r.email)}</a>`:'—'}</td><td>${r.phone?`<a href="tel:${esc(r.phone)}">${esc(fmtPhone(r.phone))}</a>`:'—'}</td><td>${esc(dash(r.country))}</td><td>${esc(dash(r.platform))}</td><td>${esc(dash(r.login))}</td><td>${esc(dash(r.path))}</td><td><span class="pill p-n">${esc(L(r.last))}</span></td><td>${esc(L(r.drop))}</td><td>${pill(r.outcome)}</td><td>${esc(dash(r.lfs))}</td><td>${esc(r.fs)}</td><td>${esc(r.le)}</td><td class="num">${r.sv}</td><td class="num">${r.ad}</td></tr>`).join(''):`<tr><td colspan="${COLS.length}" class="mut" style="text-align:center;padding:30px">No users in this view</td></tr>`)+'</tbody>';
+}
+$('utbl').onclick=e=>{const th=e.target.closest('th');if(!th)return;const k=th.dataset.k;if(view.sort===k)view.desc=!view.desc;else{view.sort=k;view.desc=!!(COLS.find(c=>c[0]===k)[2])}render()};
+$('sCsv').onclick=()=>{const H=['user_pseudo_id','name','email','phone','country_code','platform','login_method','path','max_stage','last_stage','drop_stage','outcome','completed','last_funnel_screen','first_seen_date','last_event_date','screen_views','active_days'];
+ const q=v=>{v=(v===''||v==null)?'—':String(v);if(/^[=@\t\r]/.test(v)||/^[+-](?!\d)/.test(v))v="'"+v;return /[",\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
+ const lines=[H.join(',')].concat(view.rows.map(r=>[r.id,r.name,r.email,r.phone,r.country,r.platform,r.login,r.path,r.ms,r.last,r.drop,r.outcome,r.done,r.lfs,r.fs,r.le,r.sv,r.ad].map(q).join(',')));
+ const name=`funnel_${view.id==='completed'?'completed':S[+view.id.slice(1)-1]+'_'+view.mode}_${new Date().toISOString().slice(0,10)}.csv`;
+ const blob=new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv'});
+ try{const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.target='_self';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),10000)}
+ catch(e){window.open('data:text/csv;charset=utf-8,'+encodeURIComponent('\ufeff'+lines.join('\r\n')),'_blank')}};
+
+load(false);
+})();
+</script>
